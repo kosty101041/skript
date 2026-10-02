@@ -11584,10 +11584,11 @@ RightLeg.AnchorPoint = Vector2.new(0, 0)
 end
 UI.CreateSection(VisualsTab, "Элементы ESP других игроков")
 UI.CreateToggle(VisualsTab, "Включить ESP", "ESP/Enabled", Flags["ESP/Enabled"], function(state)
-if not state then
-    for _, player in ipairs(Players:GetPlayers()) do
-        RemovePlayerOutlines(player)
-    end
+	if not state then
+		for _, player in ipairs(Players:GetPlayers()) do
+			RemovePlayerOutlines(player)
+		end
+	end
 end)
 UI.CreateNumericInput(VisualsTab, "Макс. дистанция ESP", "ESP/MaxDistance", Flags["ESP/MaxDistance"], 100, 10000, 100, " ст.")
 UI.CreateToggle(VisualsTab, "Только не союзники", "ESP/TeamCheck", Flags["ESP/TeamCheck"])
