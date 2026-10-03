@@ -169,7 +169,10 @@ RightLeg = false
 ["Misc/HorizontalPositionForceValue"] = 1.5,
 ["Misc/VerticalPositionForceValue"] = 3.5,
 ["ESP/NametagOpacity"] = 90,
-["LocalUI/ScreenUIOpacity"] = 90
+["LocalUI/ScreenUIOpacity"] = 90,
+["Fly/Enabled"] = false,
+["Fly/Speed"] = 50,
+["Fly/Acceleration"] = true
 }
 if SAFE_MODE then
 Flags["Aim/AimLock"]        = false
@@ -214,6 +217,79 @@ end
 end
 })
 local PROFILE_LOADED_FLAGS = {}  -- флаги, загруженные из профиля (хранятся отдельно от флагов, измененных пользователем)
+-- ─────────────────────────────────────────────────────────────────────────────
+--  Bind System: назначаемые клавиши для переключателей (тумблеров)
+--  ToggleBinds[flag] = Enum.KeyCode — включённый бинд для флага.
+--  Для каждого тумблера можно назначить/переназначить горячую клавишу прямо
+--  в меню (кнопка «клавиша») и во вкладке «Горячие клавиши».
+-- ─────────────────────────────────────────────────────────────────────────────
+local ToggleBinds = {}          -- [flag] = Enum.KeyCode (активные бинды)
+local ToggleLabels = {}         -- [flag] = отображаемое имя тумблера
+local ToggleSetState = {}       -- [flag] = функция(state); применяет флаг + обновляет UI (set из bind)
+local PendingBind = nil         -- flag, ожидающий назначения клавиши
+local BindUIRefs = {}           -- [flag] = { Label } ссылки на элементы списка биндов (для переназначения)
+local _toggleBindsLoaded = false
+
+function SetToggleBind(flag, keyCode)
+    if keyCode == nil then
+        ToggleBinds[flag] = nil
+    else
+        -- Не позволяем двум тумблерам иметь одну и ту же клавишу (кроме None)
+        for f, k in pairs(ToggleBinds) do
+            if f ~= flag and k == keyCode then
+                ToggleBinds[f] = nil
+                RefreshBindRow(f)
+            end
+        end
+        ToggleBinds[flag] = keyCode
+    end
+    USER_MODIFIED_FLAGS[flag .. "/Bind"] = true
+    if PendingBind == flag then PendingBind = nil end
+    RefreshBindRow(flag)
+end
+
+function GetBindLabel(flag)
+    local kc = ToggleBinds[flag]
+    if not kc then return "—" end
+    return kc.Name
+end
+
+function RegisterToggleBind(flag, label, setStateFn)
+    ToggleLabels[flag] = label
+    ToggleSetState[flag] = setStateFn
+end
+
+function RefreshBindRow(flag)
+    if BindUIRefs and BindUIRefs[flag] then
+        local ref = BindUIRefs[flag]
+        if ref.Label then ref.Label.Text = GetBindLabel(flag) end
+    end
+end
+
+-- Сериализация биндов для конфига: { [flag] = "KeyCodeName" }
+function SerializeBinds()
+    local out = {}
+    for flag, kc in pairs(ToggleBinds) do
+        if kc then out[flag] = kc.Name end
+    end
+    return out
+end
+
+-- Применение биндов из конфига (после загрузки UI, чтобы обновить кнопки)
+function ApplyBindsFromConfig(data)
+    if type(data) ~= "table" then return end
+    ToggleBinds = {}
+    for flag, keyName in pairs(data) do
+        local kc = Enum.KeyCode[keyName]
+        if kc and type(kc) == "userdata" then
+            ToggleBinds[flag] = kc
+        end
+    end
+    -- Обновим UI-кнопки биндов (если уже созданы)
+    for flag in pairs(BindUIRefs) do
+        RefreshBindRow(flag)
+    end
+end
 -- Save Modifier: фильтр выборочного сохранения, сохраняющийся в течение сессии ───────
 local SaveModifierState = {
 Active               = false,   -- true, если ≥1 элемент снят с выбора
@@ -473,6 +549,7 @@ placeId         = nil,
 savedAt         = os.time(),
 version         = VERSION,
 flags           = serializeFlags(),
+binds           = SerializeBinds(),
 whitelist       = AdvancedPlayerPanelState.Whitelist,
 blacklist       = AdvancedPlayerPanelState.Blacklist,
 teamWhitelist   = AdvancedPlayerPanelState.TeamWhitelist,
@@ -523,6 +600,7 @@ placeId         = placeId,
 savedAt         = os.time(),
 version         = VERSION,
 flags           = serializeFlags(),
+binds           = SerializeBinds(),
 whitelist       = AdvancedPlayerPanelState.Whitelist,
 blacklist       = AdvancedPlayerPanelState.Blacklist,
 teamWhitelist   = AdvancedPlayerPanelState.TeamWhitelist,
@@ -586,6 +664,7 @@ parsed.teamWhitelist = type(parsed.teamWhitelist) == "table" and parsed.teamWhit
 parsed.teamBlacklist = type(parsed.teamBlacklist) == "table" and parsed.teamBlacklist or {}
 PROFILE_LOADED_FLAGS = {}
 applyFlags(parsed.flags)
+ApplyBindsFromConfig(parsed.binds)
 -- Возвращает исправленную таблицу (строковые ключи JSON с числами → реальные int),
 -- или nil, если поле отсутствует/не таблица (сохраняя существующее состояние).
 local function fixNumberKeys(t)
@@ -3533,6 +3612,13 @@ UIState.Updaters[flag] = function(state)
 updateVisuals(state)
 if callback then callback(state) end
 end
+local function applyToggleState(state)
+Flags[flag] = state
+USER_MODIFIED_FLAGS[flag] = true
+updateVisuals(state)
+if callback then callback(state) end
+end
+RegisterToggleBind(flag, text, applyToggleState)
 TrackConnection(Button.MouseButton1Click:Connect(function()
 Flags[flag] = not Flags[flag]
 USER_MODIFIED_FLAGS[flag] = true
@@ -3540,6 +3626,34 @@ local state = Flags[flag]
 updateVisuals(state)
 if callback then callback(state) end
 end))
+local BindBtn = Instance.new("TextButton")
+BindBtn.Name = "Bind"
+BindBtn.Size = UDim2.new(0, 20, 0, 20)
+BindBtn.AnchorPoint = Vector2.new(1, 0.5)
+-- Располагаем левее зоны переключателя и (если есть) кнопки замка, чтобы не пересекаться
+BindBtn.Position = lockable and UDim2.new(1, -96, 0.5, 0) or UDim2.new(1, -64, 0.5, 0)
+BindBtn.BackgroundColor3 = Flags[flag .. "/Bind"] or Color3.fromRGB(80, 80, 90)
+BindBtn.BackgroundTransparency = 0.2
+BindBtn.Text = GetBindLabel(flag)
+BindBtn.FontFace = Font.fromName("Montserrat", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+BindBtn.TextSize = 9
+BindBtn.TextColor3 = UI_THEME.Text
+BindBtn.Parent = Frame
+local bCorner = Instance.new("UICorner")
+bCorner.CornerRadius = UDim.new(0, 4)
+bCorner.Parent = BindBtn
+BindUIRefs[flag] = { Label = BindBtn }
+BindBtn.MouseButton1Click:Connect(function()
+if PendingBind == flag then
+PendingBind = nil
+BindBtn.Text = GetBindLabel(flag)
+BindBtn.BackgroundColor3 = Color3.fromRGB(80, 80, 90)
+else
+PendingBind = flag
+BindBtn.Text = "..." 
+BindBtn.BackgroundColor3 = Color3.fromRGB(220, 120, 50)
+end
+end)
 end
 function UI.CreateNumericInput(page, text, flag, default, min, max, step, unit, callback, lockable)
 local Frame = Instance.new("Frame")
@@ -5835,7 +5949,7 @@ listContainer.Size = UDim2.new(1, 0, 0, containerLayout.AbsoluteContentSize.Y)
 end))
 TrackThread(task.spawn(function()
 while task.wait(0.5) do
-if UIState.CurrentTab == "PlayerPage" and UIState.Visible then
+if UIState.CurrentTab == "Игроки" and UIState.Visible then
 if AdvancedPlayerPanelState.CurrentView == "List" then
 UpdateAdvancedPlayerList()
 elseif AdvancedPlayerPanelState.CurrentView == "Teams" then
@@ -5869,7 +5983,7 @@ end
 end
 end))
 TrackConnection(UIState.Tabs[#UIState.Tabs].Button:GetPropertyChangedSignal("BackgroundColor3"):Connect(function()
-if UIState.CurrentTab ~= "PlayerPage" and AdvancedPlayerPanelState.selectionHighlight then
+if UIState.CurrentTab ~= "Игроки" and AdvancedPlayerPanelState.selectionHighlight then
 AdvancedPlayerPanelState.selectionHighlight:Destroy()
 AdvancedPlayerPanelState.selectionHighlight = nil
 end
@@ -5883,7 +5997,7 @@ end))
 SwitchToPlayerPageView("List")
 end
 function UpdateTeamPanelList()
-if not UIState.Visible or UIState.CurrentTab ~= "PlayerPage" then return end
+if not UIState.Visible or UIState.CurrentTab ~= "Игроки" then return end
 if AdvancedPlayerPanelState.CurrentView ~= "Teams" then return end
 local content = AdvancedPlayerPanelUI.TeamContent
 if not content then return end
@@ -6044,7 +6158,7 @@ end
 end
 function UpdateAdvancedPlayerList()
 if not AdvancedPlayerPanelUI.Initialized or not AdvancedPlayerPanelUI.SearchBox then return end
-if not UIState.Visible or UIState.CurrentTab ~= "PlayerPage" then return end
+if not UIState.Visible or UIState.CurrentTab ~= "Игроки" then return end
 if AdvancedPlayerPanelState.CurrentView ~= "List" then return end
 local players = Players:GetPlayers()
 local searchText = AdvancedPlayerPanelUI.SearchBox.Text:lower()
@@ -7696,7 +7810,8 @@ local layout = Instance.new("UIListLayout")
 layout.Padding = UDim.new(0, 2)
 layout.SortOrder = Enum.SortOrder.LayoutOrder
 layout.Parent = container
-local function CreateRow(name, initialValue)
+local function CreateRow(name, initialValue, key)
+key = key or name
 local row = Instance.new("Frame")
 row.Name = name .. "Row"
 row.Size = UDim2.new(1, 0, 0, 14)
@@ -7721,15 +7836,15 @@ value.TextSize = 11
 value.TextColor3 = Color3.fromRGB(255, 255, 255)
 value.TextXAlignment = Enum.TextXAlignment.Right
 value.Parent = row
-PerformanceRows[name] = value
+PerformanceRows[key] = value
 end
 CreateRow("FPS", "0")
-CreateRow("Пинг", "0 мс")
-CreateRow("Память", "0 МБ")
-CreateRow("Игроки", "0")
-CreateRow("Прицел", "ВЫКЛ")
-CreateRow("Сломанные объекты", "0")
-CreateRow("Выделенные объекты", "0")
+CreateRow("Пинг", "0 мс", "Ping")
+CreateRow("Память", "0 МБ", "Memory")
+CreateRow("Игроки", "0", "Players")
+CreateRow("Прицел", "ВЫКЛ", "Aim")
+CreateRow("Сломанные объекты", "0", "Br0k3n Objects")
+CreateRow("Выделенные объекты", "0", "H1ghL1ghted Objects")
 local minimizeBtn = Instance.new("TextButton")
 minimizeBtn.Name = "Minimize"
 minimizeBtn.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
@@ -9184,6 +9299,18 @@ WorldHumState.Page = UI.CreateTab("Мировые Humanoid")
 local PlayerPage = UI.CreateTab("Игроки")
 InitializePlayerPage(PlayerPage)
 local MiscTab = UI.CreateTab("Инструменты")
+local FlyTab = UI.CreateTab("Полёт")
+UI.CreateSection(FlyTab, "Режим полёта")
+UI.CreateToggle(FlyTab, "Включить полёт", "Fly/Enabled", Flags["Fly/Enabled"], function(state)
+    if state then
+        UI.Notify("Полёт", "Полёт активирован. W/A/S/D — движение, Space — вверх, Ctrl — вниз, Shift — ускорение.", 4)
+    else
+        UI.Notify("Полёт", "Полёт деактивирован.", 2)
+    end
+end)
+UI.CreateNumericInput(FlyTab, "Скорость полёта", "Fly/Speed", Flags["Fly/Speed"], 1, 500, 1, "studs/сек", function(val)
+end)
+UI.CreateToggle(FlyTab, "Плавное ускорение", "Fly/Acceleration", Flags["Fly/Acceleration"])
 local ShortcutsTab = UI.CreateTab("Горячие клавиши")
 InitializeShortcutsPage(ShortcutsTab)
 -- Save Modifier: Active-state scanner ───────────────────────────
@@ -10752,6 +10879,12 @@ UI.Notify("Пресет обновлен", "Сохранены изменени�
 end
 ShowPresetManager(page)
 end)
+local _bindsPage = page
+task.delay(0.3, function()
+    if type(InitializeBindsList) == "function" then
+        pcall(InitializeBindsList, _bindsPage)
+    end
+end)
 end
 function ShowPresetManager(page)
 if not page then return end
@@ -11584,11 +11717,11 @@ RightLeg.AnchorPoint = Vector2.new(0, 0)
 end
 UI.CreateSection(VisualsTab, "Элементы ESP других игроков")
 UI.CreateToggle(VisualsTab, "Включить ESP", "ESP/Enabled", Flags["ESP/Enabled"], function(state)
-	if not state then
-		for _, player in ipairs(Players:GetPlayers()) do
-			RemovePlayerOutlines(player)
-		end
-	end
+if not state then
+    for _, player in ipairs(Players:GetPlayers()) do
+        RemovePlayerOutlines(player)
+    end
+end
 end)
 UI.CreateNumericInput(VisualsTab, "Макс. дистанция ESP", "ESP/MaxDistance", Flags["ESP/MaxDistance"], 100, 10000, 100, " ст.")
 UI.CreateToggle(VisualsTab, "Только не союзники", "ESP/TeamCheck", Flags["ESP/TeamCheck"])
@@ -13064,6 +13197,65 @@ function UpdateAim()
         ClearAimLockState(false)
     end
 end
+
+local flyState = {
+    Hrp = nil,
+    Hum = nil,
+    LastVel = Vector3.new(),
+    Jumping = false,
+}
+local function UpdateFly(dt)
+    if SAFE_MODE or not Flags["Fly/Enabled"] then
+        if flyState.Hum then
+            flyState.Hum.UseJumpPower = flyState.SavedJumpPower or flyState.Hum.UseJumpPower
+            flyState.Hum.AutoRotate = true
+        end
+        flyState.Hrp = nil
+        flyState.Hum = nil
+        flyState.SavedJumpPower = nil
+        return
+    end
+    local char = LocalPlayer and LocalPlayer.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    local hum = char and char:FindFirstChildOfClass("Humanoid")
+    if not hrp or not hum then return end
+    flyState.Hrp = hrp
+    flyState.Hum = hum
+    if not flyState.SavedJumpPower then flyState.SavedJumpPower = hum.UseJumpPower end
+    hum.UseJumpPower = false
+    hum.AutoRotate = false
+    if hum:GetState() ~= Enum.HumanoidStateType.Flying then
+        hum:ChangeState(Enum.HumanoidStateType.Flying)
+    end
+    local cam = Camera
+    local camLook = (cam and cam.CFrame.LookVector) or Vector3.new(0, 0, -1)
+    local forward = Vector3.new(camLook.X, 0, camLook.Z)
+    if forward.Magnitude > 0 then forward = forward.Unit else forward = Vector3.new(0, 0, -1) end
+    local right = forward:Cross(Vector3.new(0, 1, 0))
+    local uis = Services.UserInputService
+    local speed = Flags["Fly/Speed"] or 50
+    local shift = uis:IsKeyDown(Enum.KeyCode.LeftShift) or uis:IsKeyDown(Enum.KeyCode.RightShift)
+    local moveSpeed = shift and (speed * 2.5) or speed
+    local move = Vector3.new()
+    if uis:IsKeyDown(Enum.KeyCode.W) then move = move + forward end
+    if uis:IsKeyDown(Enum.KeyCode.S) then move = move - forward end
+    if uis:IsKeyDown(Enum.KeyCode.D) then move = move + right end
+    if uis:IsKeyDown(Enum.KeyCode.A) then move = move - right end
+    if uis:IsKeyDown(Enum.KeyCode.Space) then move = move + Vector3.new(0, 1, 0) end
+    if uis:IsKeyDown(Enum.KeyCode.LeftControl) or uis:IsKeyDown(Enum.KeyCode.RightControl) then move = move - Vector3.new(0, 1, 0) end
+    local accel = Flags["Fly/Acceleration"]
+    if accel then
+        local targetVel = move * moveSpeed
+        local diff = targetVel - hrp.AssemblyLinearVelocity
+        local maxStep = moveSpeed * dt * 4
+        local stepVec = diff
+        if stepVec.Magnitude > maxStep then stepVec = stepVec.Unit * maxStep end
+        hrp.AssemblyLinearVelocity = hrp.AssemblyLinearVelocity + stepVec
+    else
+        hrp.CFrame = hrp.CFrame + move * moveSpeed * dt
+        hrp.AssemblyLinearVelocity = Vector3.new()
+    end
+end
 TrackConnection(RunService.RenderStepped:Connect(UpdateAim))
 lastEspUpdate = 0
 espUpdateRate = 0.2
@@ -13101,6 +13293,7 @@ function UnifiedHeartbeat(dt)
         end
     end
     UpdateLighting()
+    UpdateFly(dt)
     if (now - lastStateEnforcement) > 0.1 or ghostModeChanged then
         lastStateEnforcement = now
         UpdateLocalHealthHUD()
@@ -13422,8 +13615,8 @@ local shootBotThread = task.spawn(function()
                                 local tool = targetPart:FindFirstAncestorOfClass("Tool")
                                 if tool then
                                     bodyPart = character:FindFirstChild("RightHand") or character:FindFirstChild("Right Arm")
-                                end
-                            end
+end
+end
                         end
                         if bodyPart then
                             local name = bodyPart.Name
@@ -13536,4 +13729,173 @@ do
             end
         end)
     end
+end
+
+-- ╔══════════════════════════════════════════════════════════════════╗
+-- ║  Bind System — Назначаемые клавиши для переключателей            ║
+-- ╚══════════════════════════════════════════════════════════════════╝
+do
+    -- Фильтруем клавиши, которые нельзя использовать как бинды
+    local BANNED_KEYCODES = {
+        [Enum.KeyCode.Insert] = true,      -- открытие меню
+        [Enum.KeyCode.CapsLock] = true,    -- сворачивание UI
+        [Enum.KeyCode.LeftShift] = true,   -- модификаторы
+        [Enum.KeyCode.RightShift] = true,
+        [Enum.KeyCode.LeftControl] = true,
+        [Enum.KeyCode.RightControl] = true,
+        [Enum.KeyCode.LeftAlt] = true,
+        [Enum.KeyCode.RightAlt] = true,
+        [Enum.KeyCode.Backspace] = true,
+        [Enum.KeyCode.Escape] = true,
+        [Enum.KeyCode.Unknown] = true,
+    }
+
+    local function keyFromInput(input)
+        if input.UserInputType == Enum.UserInputType.Keyboard then
+            local kc = input.KeyCode
+            if kc == Enum.KeyCode.Unknown then return nil end
+            return kc
+        end
+        -- Мышиные кнопки назначить нельзя (используются для Aim/Br3ak3r/UI)
+        return nil
+    end
+
+    TrackConnection(Services.UserInputService.InputBegan:Connect(function(input, gameProcessed)
+        if PendingBind then
+            -- Ждём только нажатие КЛАВИШИ, чтобы назначить бинд.
+            local kc = keyFromInput(input)
+            if kc then
+                if BANNED_KEYCODES[kc] then
+                    UI.Notify("Горячая клавиша", "Эта клавиша зарезервирована. Нажмите другую.", 3)
+                else
+                    SetToggleBind(PendingBind, kc)
+                    UI.Notify("Горячая клавиша", string.format("\"%s\" → %s", ToggleLabels[PendingBind] or PendingBind, kc.Name), 3)
+                end
+                local bound = PendingBind
+                PendingBind = nil
+                RefreshBindRow(bound)
+                return
+            end
+            return
+        end
+
+        -- Переключение по назначенным биндам
+        local kc = keyFromInput(input)
+        if kc and not gameProcessed then
+            for flag, bindKc in pairs(ToggleBinds) do
+                if bindKc == kc and ToggleSetState[flag] then
+                    local newState = not (Flags[flag] == true)
+                    ToggleSetState[flag](newState)
+                    break
+                end
+            end
+        end
+    end))
+end
+
+function InitializeBindsList(page)
+    UI.CreateSection(page, "Переключатели — назначенные клавиши")
+    local hint = Instance.new("TextLabel")
+    hint.Size = UDim2.new(1, -10, 0, 34)
+    hint.Position = UDim2.new(0, 8, 0, 0)
+    hint.BackgroundTransparency = 1
+    hint.FontFace = Font.fromName("Montserrat", Enum.FontWeight.Medium, Enum.FontStyle.Normal)
+    hint.TextSize = 10
+    hint.TextColor3 = UI_THEME.TextDark
+    hint.TextXAlignment = Enum.TextXAlignment.Left
+    hint.TextYAlignment = Enum.TextYAlignment.Top
+    hint.TextWrapped = true
+    hint.Text = "Нажмите кнопку с клавишей (напр. «—») у любого переключателя, затем нажмите нужную клавишу. Повторное нажатие — переназначить."
+    hint.Parent = page
+
+    local BindListContent = Instance.new("Frame")
+    BindListContent.Name = "BindListContent"
+    BindListContent.Size = UDim2.new(1, 0, 0, 0)
+    BindListContent.AutomaticSize = Enum.AutomaticSize.Y
+    BindListContent.BackgroundTransparency = 1
+    BindListContent.Parent = page
+    local listLayout = Instance.new("UIListLayout")
+    listLayout.Padding = UDim.new(0, 6)
+    listLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    listLayout.Parent = BindListContent
+
+    local function AddRow(flag)
+        local label = ToggleLabels[flag] or flag
+        local row = Instance.new("Frame")
+        row.Size = UDim2.new(1, 0, 0, 36)
+        row.BackgroundColor3 = UI_THEME.Element
+        row.BorderSizePixel = 0
+        row.Parent = BindListContent
+        local rCorner = Instance.new("UICorner")
+        rCorner.CornerRadius = UDim.new(0, 6)
+        rCorner.Parent = row
+        local nameLabel = Instance.new("TextLabel")
+        nameLabel.Size = UDim2.new(0.55, 0, 1, 0)
+        nameLabel.Position = UDim2.new(0, 12, 0, 0)
+        nameLabel.BackgroundTransparency = 1
+        nameLabel.FontFace = Font.fromName("Montserrat", Enum.FontWeight.SemiBold, Enum.FontStyle.Normal)
+        nameLabel.TextSize = 12
+        nameLabel.TextColor3 = UI_THEME.Text
+        nameLabel.TextXAlignment = Enum.TextXAlignment.Left
+        nameLabel.Text = label
+        nameLabel.Parent = row
+        local bindBtn = Instance.new("TextButton")
+        bindBtn.AnchorPoint = Vector2.new(1, 0.5)
+        bindBtn.Position = UDim2.new(1, -12, 0.5, 0)
+        bindBtn.Size = UDim2.new(0, 110, 0, 24)
+        bindBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+        bindBtn.BackgroundTransparency = 0.1
+        bindBtn.BorderSizePixel = 0
+        bindBtn.FontFace = Font.fromName("Montserrat", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+        bindBtn.TextSize = 11
+        bindBtn.TextColor3 = UI_THEME.Text
+        bindBtn.Text = GetBindLabel(flag)
+        bindBtn.Parent = row
+        local bCorner = Instance.new("UICorner")
+        bCorner.CornerRadius = UDim.new(0, 5)
+        bCorner.Parent = bindBtn
+        BindUIRefs[flag] = { Label = bindBtn }
+        bindBtn.MouseButton1Click:Connect(function()
+            if PendingBind == flag then
+                PendingBind = nil
+                bindBtn.Text = GetBindLabel(flag)
+                bindBtn.BackgroundColor3 = Color3.fromRGB(60, 60, 70)
+            else
+                PendingBind = flag
+                bindBtn.Text = "..."
+                bindBtn.BackgroundColor3 = Color3.fromRGB(220, 120, 50)
+            end
+        end)
+        local clearBtn = Instance.new("TextButton")
+        clearBtn.AnchorPoint = Vector2.new(1, 0.5)
+        clearBtn.Position = UDim2.new(1, -128, 0.5, 0)
+        clearBtn.Size = UDim2.new(0, 20, 0, 20)
+        clearBtn.BackgroundColor3 = Color3.fromRGB(70, 45, 45)
+        clearBtn.BackgroundTransparency = 0.2
+        clearBtn.BorderSizePixel = 0
+        clearBtn.FontFace = Font.fromName("Montserrat", Enum.FontWeight.Bold, Enum.FontStyle.Normal)
+        clearBtn.TextSize = 11
+        clearBtn.TextColor3 = UI_THEME.Text
+        clearBtn.Text = "x"
+        clearBtn.Parent = row
+        local cCorner = Instance.new("UICorner")
+        cCorner.CornerRadius = UDim.new(1, 0)
+        cCorner.Parent = clearBtn
+        clearBtn.MouseButton1Click:Connect(function()
+            SetToggleBind(flag, nil)
+        end)
+    end
+
+    local flags = {}
+    for f in pairs(ToggleSetState) do table.insert(flags, f) end
+    table.sort(flags)
+    for _, f in ipairs(flags) do
+        TaskDefer_AddRow(AddRow, f)
+    end
+end
+
+function TaskDefer_AddRow(fn, arg)
+    task.defer(function()
+        if fn then pcall(fn, arg) end
+    end)
 end
